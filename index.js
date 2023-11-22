@@ -29,7 +29,7 @@ const client = new MongoClient(uri, {
 async function run() {
     try {
 
-        await client.connect();
+        // await client.connect();
 
 
         // db collection 
@@ -41,6 +41,8 @@ async function run() {
             .collection("reviews");
         const cartsCollection = client.db("bistroDB")
             .collection("carts");
+        const paymentCollection = client.db("bistroDB")
+            .collection("payments");
 
 
 
@@ -241,9 +243,116 @@ async function run() {
             })
         })
 
+        app.get('/payments/:email', verifyToken, async (req, res) => {
+            const query = { email: req.params.email }
 
-        await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+            if (req.params.email !== req.decoded.email) {
+                return res.status(403).send({ message: 'forbidden access' })
+            }
+            const result = await paymentCollection.find(query).toArray()
+            res.send(result)
+        })
+
+        app.post('/payments', async (req, res) => {
+            const payment = req.body
+            const paymentResult = await paymentCollection.insertOne(payment)
+
+            // carefully delete item from the cart
+            console.log('payment info', payment)
+            const query = {
+                _id: {
+                    $in: payment.cartIds.map(id => new ObjectId(id))
+                }
+            }
+            const deleteResult = await cartsCollection.deleteMany(query)
+
+            res.send({ paymentResult, deleteResult })
+        })
+
+        // statistic or analytics 
+        app.get('/admin-stats', verifyToken, verifyAdmin, async (req, res) => {
+            const users = await userCollection.estimatedDocumentCount()
+            const menuItems = await menuCollection.estimatedDocumentCount()
+            const orders = await paymentCollection.estimatedDocumentCount()
+            // this is not good way get total price
+            // const payments =await paymentCollection.find().toArray()
+            // const revenue= payments.reduce((total,payment)=>total+payment.price,0)
+
+            // this is  good way get total price
+            const result = await paymentCollection.aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        totalRevenue: {
+                            $sum: '$price'
+                        }
+                    }
+                },
+            ]).toArray()
+            const revenue = result.length > 0 ? result[0].totalRevenue : 0;
+
+
+            res.send({ users, menuItems, orders, revenue })
+        })
+        // order status
+        /****
+         * ---------------------
+         * Non-Efficient way
+         * ----------------------
+         * 1.load all payment
+         * 2.for every menuIteIds (which is an array),go find 
+         *  the items of the menu
+         * 3.for every item in the menu collection that i found 
+         *  from  a payment entry(document)
+         *
+         */
+
+        // using aggregationPipeline 
+        app.get('/order-stats', verifyToken, verifyAdmin, async (req, res) => {
+            const result = await paymentCollection.aggregate([
+                // 1st pipeline  
+                {
+                    $unwind: '$menuItemIds',
+                },
+                // 2nd pipeline 
+                {
+                    $lookup: {
+                        from: 'menu',
+                        localField: 'menuItemIds',
+                        foreignField: '_id',
+                        as: 'menuItems'
+                    }
+                },
+                {
+                    $unwind: '$menuItems',
+                },
+
+                // 3rd pipeline for setup
+                 {
+                    $group:{
+                        _id:'$menuItems.category',
+                        quantity:{ $sum:1},
+                        revenue:{$sum:'$menuItems.price'}
+                        
+                           
+                    }
+                },
+                   // 4th pipeline for change
+                {
+                    $project:{
+                        _id:0,
+                        category:'$_id',
+                        quantity:'$quantity',
+                        revenue:'$revenue'
+                    }
+                }
+            ]).toArray()
+            res.send(result)
+
+        })
+
+        // await client.db("admin").command({ ping: 1 });
+        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
 
         // await client.close();
